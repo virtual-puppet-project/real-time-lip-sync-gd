@@ -60,11 +60,11 @@ impl MfccData {
 #[derive(Default)]
 pub struct Profile {
     // The number of MFCC data to calculate the average MFCC values
-    pub mfcc_data_count: i64,
+    pub mfcc_data_count: i64, // defined as 1 - 256 in the Unity impl
     // The number of Mel Filter Bank channels
-    pub mel_filter_bank_channels: i64,
+    pub mel_filter_bank_channels: i64, // defined as 12 - 48 in the Unity impl
     // Target sampling rate to apply downsampling
-    pub target_sample_rate: i64,
+    pub target_sample_rate: i64, // defined as 1000 - 96000 in the Unity impl
     // Number of audio samples after downsampling is applied
     pub sample_count: i64,
     pub min_volume: f64,
