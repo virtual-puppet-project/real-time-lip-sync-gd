@@ -39,6 +39,7 @@ pub fn normalize(array: &mut Vec<f64>) {
     }
 }
 
+// TODO seems like the data coming in is stored as i64, not f64
 // Data will always be pre-populated because this is copied from a ringbuffer
 pub fn low_pass_filter(data: &mut [f64], sample_rate: f64, cutoff: f64, range: f64) {
     let cutoff = cutoff / sample_rate;
@@ -206,8 +207,6 @@ pub fn mel_filter_bank(
     let df = f_max / n_max as f64;
     let d_mel = mel_max / (mel_div + 1) as f64;
 
-    println!("df:{}", df);
-
     for n in 0..mel_div as usize {
         let mel_begin = d_mel * n as f64;
         let mel_center = d_mel * (n as f64 + 1.0);
@@ -249,14 +248,18 @@ pub fn to_hz(mel: f64) -> f64 {
 
 pub fn dct(spectrum: &[f64], cepstrum: &mut Vec<f64>) {
     let len = spectrum.len();
-    *cepstrum = Vec::with_capacity(len);
+    cepstrum.resize(len, 0.0);
 
     let a = PI / len as f64;
     for i in 0..len {
         let mut sum = 0.0;
         for j in 0..len {
             let ang = (j as f64 + 0.5) * i as f64 * a;
-            sum += spectrum[j] * ang.cos();
+            sum += if ang.abs() > 0.0 {
+                spectrum[j] * ang.cos()
+            } else {
+                0.0
+            };
         }
         cepstrum[i] = sum;
     }
@@ -522,8 +525,12 @@ mod tests {
         let mut mel_spectrum: Vec<f64> = vec![];
         mel_filter_bank(spectrum.as_slice(), &mut mel_spectrum, CD_SAMPLE_RATE, 12);
 
-        // TODO collect the non-zero numbers and compare them
-        assert_eq!(mel_spectrum, spectrum);
+        let rounded_non_zero_output: Vec<f64> = mel_spectrum
+            .into_iter()
+            .filter_map(|v| if v != 0.0 { Some(v.round()) } else { None })
+            .collect();
+
+        assert_eq!(rounded_non_zero_output, vec![14109.0, 33861.0]);
     }
 
     const BASE_HZ: f64 = 161.0;
@@ -542,5 +549,57 @@ mod tests {
     #[test]
     fn test_mel_hz_round_trip() {
         assert_eq!(to_hz(to_mel(BASE_HZ)).round(), BASE_HZ);
+    }
+
+    #[test]
+    fn test_dct() {
+        let mut input = vec![
+            10000.0, 20000.0, 30000.0, 5000.0, 10000.0, 30000.0, 20000.0, 10000.0, 20000.0,
+            30000.0, 20000.0, 10000.0, 30000.0, 20000.0, 10000.0,
+        ];
+        low_pass_filter(
+            input.as_mut_slice(),
+            CD_SAMPLE_RATE,
+            TARGET_CUTOFF,
+            TARGET_RANGE,
+        );
+
+        let mut output: Vec<f64> = vec![];
+        down_sample(
+            input.as_slice(),
+            &mut output,
+            CD_SAMPLE_RATE as i64,
+            RECORDING_SAMPLE_RATE as i64,
+        );
+
+        pre_emphasis(output.as_mut_slice(), 0.97);
+
+        hamming_window(output.as_mut_slice());
+
+        let mut spectrum: Vec<f64> = vec![];
+
+        fft(output.as_slice(), &mut spectrum);
+
+        let mut mel_spectrum: Vec<f64> = vec![];
+        mel_filter_bank(spectrum.as_slice(), &mut mel_spectrum, CD_SAMPLE_RATE, 12);
+
+        for i in 0..mel_spectrum.len() {
+            let v = mel_spectrum[i];
+            mel_spectrum[i] = if v > 0.0 {
+                mel_spectrum[i].log10()
+            } else {
+                0.0
+            };
+        }
+
+        let mut mel_cepstrum = vec![];
+        dct(mel_spectrum.as_slice(), &mut mel_cepstrum);
+
+        let rounded_cepstrum: Vec<f64> = mel_cepstrum.into_iter().map(f64::round).collect();
+
+        assert_eq!(
+            rounded_cepstrum,
+            vec![0.0, -3.0, 3.0, -3.0, 3.0, -3.0, 2.0, -2.0, 2.0, -1.0, 1.0, 0.0]
+        );
     }
 }
