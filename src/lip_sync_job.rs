@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use crate::algorithm::*;
 
 #[derive(Default, Clone)]
@@ -18,6 +20,8 @@ pub struct LipSyncJob {
     pub mfcc: Vec<f64>,
     pub phonemes: Vec<f64>,
     pub result: Vec<LipSyncJobResult>,
+
+    pub is_complete: bool,
 }
 
 impl LipSyncJob {

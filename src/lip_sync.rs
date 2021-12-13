@@ -2,20 +2,34 @@ use gdnative::{
     api::{AudioEffect, AudioServer},
     prelude::*,
 };
+use std::{
+    sync::{mpsc, Arc, Mutex},
+    thread,
+};
 
 use crate::common::LipSyncInfo;
 use crate::lip_sync_job::*;
 use crate::profile::*;
 
+// struct JobHandle(mpsc::Receiver<LipSyncJobHandle>);
+
+// unsafe impl Sync for JobHandle {}
+// unsafe impl Send for JobHandle {}
+
+// struct JobTransmitter(mpsc::Sender<LipSyncJobHandle>);
+
+// unsafe impl Sync for JobTransmitter {}
+// unsafe impl Send for JobTransmitter {}
+
 #[derive(NativeClass)]
 #[inherit(Reference)]
 #[user_data(user_data::RwLockData<LipSync>)]
+// #[user_data(user_data::ArcData<LipSync>)]
 #[register_with(Self::register_lip_sync)]
 pub struct LipSync {
     // Godot-specific stuff
     effect: Option<Ref<AudioEffect, Shared>>,
 
-    // Unity stuff
     pub profile: Profile,
     pub output_sound_gain: f64,
 
@@ -30,11 +44,33 @@ pub struct LipSync {
     requested_calibration_vowels: Vec<i64>,
 
     result: LipSyncInfo,
+
+    join_handle: Option<thread::JoinHandle<()>>,
+    job: Arc<Mutex<LipSyncJob>>,
 }
 
 #[methods]
 impl LipSync {
     fn new(_owner: &Reference) -> Self {
+        let job = Arc::new(Mutex::new(LipSyncJob::new()));
+        let thread_job = job.clone();
+
+        let builder = thread::Builder::new();
+        // TODO handle thread spawn error
+        let join_handle = match builder.spawn(move || loop {
+            // TODO don't unwrap, handle poisoning instead
+            let mut job = thread_job.lock().expect("Unable to lock job in thread");
+
+            if !job.is_complete {
+                job.execute();
+                job.is_complete = true;
+            }
+            drop(job);
+        }) {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        };
+
         LipSync {
             effect: None,
 
@@ -52,6 +88,9 @@ impl LipSync {
             requested_calibration_vowels: vec![],
 
             result: LipSyncInfo::default(),
+
+            join_handle: join_handle,
+            job: job,
         }
     }
 
@@ -75,8 +114,17 @@ impl LipSync {
 
     // Maps to Update() in the Unity impl
     #[export]
-    fn _process(&mut self, owner: &Reference) {
-        //
+    pub fn update(&mut self, owner: &Reference) {
+        {
+            // TODO don't unwrap, handle poisoning instead
+            let job = self
+                .job
+                .lock()
+                .expect("Unable to lock job in update_result");
+            if !job.is_complete {
+                return;
+            }
+        }
 
         self.update_result();
         self.invoke_callback(owner);
@@ -86,6 +134,14 @@ impl LipSync {
 
         self.update_buffers();
         self.update_audio_source();
+    }
+
+    pub fn shutdown(&mut self, _owner: &Reference) {
+        self.join_handle
+            .take()
+            .expect("Unable to get join handle from option")
+            .join()
+            .expect("Unable to join thread");
     }
 
     fn awake() {
@@ -128,16 +184,25 @@ impl LipSync {
     }
 
     fn update_result(&mut self) {
-        // wait for thread to complete
-        // TODO stub
+        // TODO wait for thread to complete
+        // don't want to join thread because that will block
+        // TODO don't unwrap, handle poisoning instead
+        let job = self
+            .job
+            .lock()
+            .expect("Unable to lock job in update_result");
 
-        self.mfcc_for_other.copy_from_slice(&self.mfcc);
+        // self.mfcc_for_other.copy_from_slice(&self.mfcc);
+        self.mfcc_for_other.copy_from_slice(&job.mfcc);
 
         // TODO hopefully they're not just using lists as their main data structure
-        let index = self.job_result[0].index;
+        // let index = self.job_result[0].index;
+        let index = job.result[0].index;
         let phoneme = self.profile.get_phoneme(index as usize);
-        let distance = self.job_result[0].distance;
-        let mut vol = self.job_result[0].volume.log10();
+        // let distance = self.job_result[0].distance;
+        let distance = job.result[0].distance;
+        // let mut vol = self.job_result[0].volume.log10();
+        let mut vol = job.result[0].volume.log10();
         let min_vol = self.profile.min_volume;
         let max_vol = self.profile.max_volume.max(min_vol + 1e-4_f64);
         vol = (vol - min_vol) / (max_vol - min_vol);
@@ -167,26 +232,27 @@ impl LipSync {
     }
 
     fn schedule_job(&mut self) {
-        // TODO incomplete, this is the hard part
-        let mut index: i64 = 0;
+        // The logic here doesn't make sense from the Unity impl
+        // thus, it is commented out and we just use the struct value
+        // let mut index: i64 = 0;
 
         self.input_data.clone_from(&self.raw_input_data);
-        index = self.index;
+        // index = self.index;
 
-        // TODO cloning for now, we might actually need a reference
-        let job = LipSyncJob {
-            input: self.input_data.clone(),
-            start_index: index,
-            output_sample_rate: AudioServer::godot_singleton().get_mix_rate() as i64,
-            target_sample_rate: self.profile.target_sample_rate,
-            volume_thresh: (10.0 as f64).powf(self.profile.min_volume),
-            mel_filter_bank_channels: self.profile.mel_filter_bank_channels,
-            mfcc: self.mfcc.clone(),
-            phonemes: self.phonemes.clone(),
-            result: self.job_result.clone(),
-        };
+        // TODO don't unwrap, handle poisoning instead
+        let mut job = self.job.lock().expect("Unable to lock job in schedule_job");
+        // TODO cloning input for now, we might actually need a reference
+        job.input = self.input_data.clone();
+        job.start_index = self.index;
+        job.output_sample_rate = AudioServer::godot_singleton().get_mix_rate() as i64;
+        job.target_sample_rate = self.profile.target_sample_rate;
+        job.volume_thresh = (10.0 as f64).powf(self.profile.min_volume);
+        job.mel_filter_bank_channels = self.profile.mel_filter_bank_channels;
+        job.mfcc = self.mfcc.clone();
+        job.phonemes = self.phonemes.clone();
+        job.result = self.job_result.clone();
 
-        // TODO run on thread
+        job.is_complete = false;
     }
 
     #[export]
