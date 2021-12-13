@@ -3,7 +3,7 @@ use gdnative::{
     prelude::*,
 };
 use std::{
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -37,10 +37,10 @@ pub struct LipSync {
 
     raw_input_data: Vec<f64>,
     input_data: Vec<f64>,
-    mfcc: Vec<f64>,
+    mfcc: Arc<Mutex<Vec<f64>>>,
     mfcc_for_other: Vec<f64>,
     phonemes: Vec<f64>,
-    job_result: Vec<LipSyncJobResult>,
+    job_result: Arc<Mutex<LipSyncJobResult>>,
     requested_calibration_vowels: Vec<i64>,
 
     result: LipSyncInfo,
@@ -81,10 +81,10 @@ impl LipSync {
 
             raw_input_data: vec![],
             input_data: vec![],
-            mfcc: vec![],
+            mfcc: Arc::new(Mutex::new(vec![0.0; 12])),
             mfcc_for_other: vec![],
             phonemes: vec![],
-            job_result: vec![],
+            job_result: Arc::new(Mutex::new(LipSyncJobResult::default())),
             requested_calibration_vowels: vec![],
 
             result: LipSyncInfo::default(),
@@ -136,6 +136,7 @@ impl LipSync {
         self.update_audio_source();
     }
 
+    #[export]
     pub fn shutdown(&mut self, _owner: &Reference) {
         self.join_handle
             .take()
@@ -157,20 +158,38 @@ impl LipSync {
     }
 
     fn allocate_buffers(&mut self) {
-        self.raw_input_data = vec![];
-        self.input_data = vec![];
-        self.mfcc = vec![];
-        self.mfcc_for_other = vec![];
-        self.job_result = vec![];
-        self.phonemes = vec![];
+        // self.raw_input_data = vec![];
+        // self.input_data = vec![];
+        // self.mfcc = Arc::new(Mutex::new(vec![0.0; 12]));
+        // self.mfcc_for_other = vec![];
+        // let mut res = self
+        //     .job_result
+        //     .lock()
+        //     .expect("Unable to lock job_result when allocating");
+        // res.index = 0;
+        // res.volume = 0.0;
+        // res.distance = 0.0;
+        // res = LipSyncJobResult::default();
+        // self.phonemes = vec![];
     }
 
     fn dispose_buffers(&mut self) {
         self.raw_input_data.clear();
         self.input_data.clear();
-        self.mfcc.clear();
+        let mut mfcc = self
+            .mfcc
+            .lock()
+            .expect("Unable to lock mfcc when disposing of the buffer");
+        mfcc.clear();
+        mfcc.resize(12, 0.0);
         self.mfcc_for_other.clear();
-        self.job_result.clear();
+        let mut res = self
+            .job_result
+            .lock()
+            .expect("Unable to lock job_result when disposing of the buffer");
+        res.index = 0;
+        res.volume = 0.0;
+        res.distance = 0.0;
         self.phonemes.clear();
     }
 
@@ -192,29 +211,27 @@ impl LipSync {
             .lock()
             .expect("Unable to lock job in update_result");
 
-        // self.mfcc_for_other.copy_from_slice(&self.mfcc);
-        self.mfcc_for_other.copy_from_slice(&job.mfcc);
+        let mfcc = job.mfcc.lock().expect("Unable to lock mfcc on job");
+        self.mfcc_for_other.copy_from_slice(&mfcc);
 
         // TODO hopefully they're not just using lists as their main data structure
-        // let index = self.job_result[0].index;
-        let index = job.result[0].index;
+        let result = job.result.lock().expect("Unable to lock result on job");
+        let index = result.index;
         let phoneme = self.profile.get_phoneme(index as usize);
-        // let distance = self.job_result[0].distance;
-        let distance = job.result[0].distance;
-        // let mut vol = self.job_result[0].volume.log10();
-        let mut vol = job.result[0].volume.log10();
+        let distance = result.distance;
+        let mut vol = result.volume.log10();
         let min_vol = self.profile.min_volume;
         let max_vol = self.profile.max_volume.max(min_vol + 1e-4_f64);
         vol = (vol - min_vol) / (max_vol - min_vol);
         vol = f64::clamp(vol, 0.0, 1.0);
 
-        self.result = LipSyncInfo::new(index, phoneme, vol, self.job_result[0].volume, distance);
+        self.result = LipSyncInfo::new(index, phoneme, vol, result.volume, distance);
     }
 
     fn invoke_callback(&mut self, owner: &Reference) {
         owner.emit_signal(
             "lip_sync_updated",
-            &[Variant::from_dictionary(&self.result())],
+            &[Variant::from_dictionary(&self.result(owner))],
         );
     }
 
@@ -264,11 +281,15 @@ impl LipSync {
     }
 
     fn update_calibration(&mut self) {
+        let shared_mfcc = self
+            .mfcc
+            .lock()
+            .expect("Unable to lock mfcc in update_calibration");
         for index in self.requested_calibration_vowels.iter() {
             // We can assume index is greater than 0 because we check
             // for this in request_calibration
             self.profile
-                .update_mfcc(*index as usize, self.mfcc.clone(), true);
+                .update_mfcc(*index as usize, shared_mfcc.clone(), true);
         }
 
         self.requested_calibration_vowels.clear();
@@ -317,7 +338,8 @@ impl LipSync {
     }
 
     // Changed from property in the Unity impl to function
-    pub fn result(&self) -> Dictionary {
+    #[export]
+    pub fn result(&self, _owner: &Reference) -> Dictionary {
         let dict = Dictionary::new();
         dict.insert("index", self.result.index);
         dict.insert("phoneme", self.result.phoneme.clone());

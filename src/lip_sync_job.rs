@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 
 use crate::algorithm::*;
 
@@ -17,9 +17,9 @@ pub struct LipSyncJob {
     pub target_sample_rate: i64,
     pub mel_filter_bank_channels: i64,
     pub volume_thresh: f64,
-    pub mfcc: Vec<f64>,
+    pub mfcc: Arc<Mutex<Vec<f64>>>,
     pub phonemes: Vec<f64>,
-    pub result: Vec<LipSyncJobResult>,
+    pub result: Arc<Mutex<LipSyncJobResult>>,
 
     pub is_complete: bool,
 }
@@ -32,11 +32,17 @@ impl LipSyncJob {
     pub fn execute(&mut self) {
         let volume = get_rms_volume(self.input.as_slice());
         if volume < self.volume_thresh {
-            let mut res_1 = self.result[0].clone();
+            // TODO actually handle the error
+            let mut shared_res = self.result.lock().expect(
+                "Unable to lock result[0] in lip_sync_job when volume is less than volume_thresh",
+            );
+            let mut res_1 = shared_res.clone();
             res_1.index = -1;
             res_1.volume = volume;
             res_1.distance = f64::MAX;
-            self.result[0] = res_1;
+            shared_res.index = res_1.index;
+            shared_res.volume = res_1.volume;
+            shared_res.distance = res_1.distance;
             return;
         }
 
@@ -80,6 +86,21 @@ impl LipSyncJob {
             self.mel_filter_bank_channels,
         );
 
+        if mel_spectrum.len() == 0 {
+            // TODO actually handle the error
+            let mut shared_res = self.result.lock().expect(
+                "Unable to lock result[0] in lip_sync_job when volume is less than volume_thresh",
+            );
+            let mut res_1 = shared_res.clone();
+            res_1.index = -1;
+            res_1.volume = volume;
+            res_1.distance = f64::MAX;
+            shared_res.index = res_1.index;
+            shared_res.volume = res_1.volume;
+            shared_res.distance = res_1.distance;
+            return;
+        }
+
         for i in 0..mel_spectrum.len() {
             let v = mel_spectrum[i];
             mel_spectrum[i] = if v > 0.0 {
@@ -92,14 +113,37 @@ impl LipSyncJob {
         let mut mel_cepstrum = vec![];
         dct(mel_spectrum.as_slice(), &mut mel_cepstrum);
 
-        for i in 1..13 {
-            self.mfcc[i - 1] = mel_cepstrum[i];
+        if mel_cepstrum.len() == 0 {
+            // TODO actually handle the error
+            let mut shared_res = self.result.lock().expect(
+                "Unable to lock result[0] in lip_sync_job when volume is less than volume_thresh",
+            );
+            let mut res_1 = shared_res.clone();
+            res_1.index = -1;
+            res_1.volume = volume;
+            res_1.distance = f64::MAX;
+            shared_res.index = res_1.index;
+            shared_res.volume = res_1.volume;
+            shared_res.distance = res_1.distance;
+            return;
         }
+
+        let mut shared_mfcc = self.mfcc.lock().expect("Unable to lock mfcc");
+        for i in 1..13 {
+            shared_mfcc[i - 1] = mel_cepstrum[i];
+        }
+        drop(shared_mfcc);
 
         let mut res = LipSyncJobResult::default();
         res.volume = volume;
         self.get_vowel(&mut res);
-        self.result[0] = res;
+        let mut shared_res = self
+            .result
+            .lock()
+            .expect("Unable to lock result[0] in lip_sync_job when assigning first result");
+        shared_res.index = res.index;
+        shared_res.volume = res.volume;
+        shared_res.distance = res.distance;
     }
 
     fn get_vowel(&self, result: &mut LipSyncJobResult) {
@@ -115,10 +159,14 @@ impl LipSyncJob {
     }
 
     fn calc_total_distance(&self, index: usize) -> f64 {
+        let shared_mfcc = self.mfcc.lock().expect("Unable to lock mfcc");
         let mut distance: f64 = 0.0;
         let offset = index * 12;
-        for i in 0..self.mfcc.len() {
-            distance += (self.mfcc[i] - self.phonemes[i + offset]).abs();
+        // for i in 0..self.mfcc.len() {
+        //     distance += (self.mfcc[i] - self.phonemes[i + offset]).abs();
+        // }
+        for i in 0..shared_mfcc.len() {
+            distance += (shared_mfcc[i] - self.phonemes[i + offset]).abs();
         }
 
         distance
