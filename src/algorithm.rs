@@ -13,6 +13,9 @@ pub fn get_max_value(array: &[f64]) -> f64 {
 }
 
 pub fn get_rms_volume(array: &[f64]) -> f64 {
+    if array.len() == 0 {
+        return 0.0;
+    }
     let mut average: f64 = 0.0;
     for i in array {
         average += i.powi(2);

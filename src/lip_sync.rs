@@ -61,6 +61,10 @@ impl LipSync {
             // TODO don't unwrap, handle poisoning instead
             let mut job = thread_job.lock().expect("Unable to lock job in thread");
 
+            if job.should_stop {
+                break;
+            }
+
             if !job.is_complete {
                 job.execute();
                 job.is_complete = true;
@@ -137,6 +141,12 @@ impl LipSync {
     }
 
     #[export]
+    pub fn stop_thread(&mut self, _owner: &Reference) {
+        let mut job = self.job.lock().expect("Unable to lock job in thread");
+        job.should_stop = true;
+    }
+
+    #[export]
     pub fn shutdown(&mut self, _owner: &Reference) {
         self.join_handle
             .take()
@@ -157,21 +167,7 @@ impl LipSync {
         unimplemented!("Unity-specific")
     }
 
-    fn allocate_buffers(&mut self) {
-        // self.raw_input_data = vec![];
-        // self.input_data = vec![];
-        // self.mfcc = Arc::new(Mutex::new(vec![0.0; 12]));
-        // self.mfcc_for_other = vec![];
-        // let mut res = self
-        //     .job_result
-        //     .lock()
-        //     .expect("Unable to lock job_result when allocating");
-        // res.index = 0;
-        // res.volume = 0.0;
-        // res.distance = 0.0;
-        // res = LipSyncJobResult::default();
-        // self.phonemes = vec![];
-    }
+    fn allocate_buffers(&mut self) {}
 
     fn dispose_buffers(&mut self) {
         self.raw_input_data.clear();
@@ -183,6 +179,7 @@ impl LipSync {
         mfcc.clear();
         mfcc.resize(12, 0.0);
         self.mfcc_for_other.clear();
+        self.mfcc_for_other.resize(12, 0.0);
         let mut res = self
             .job_result
             .lock()
@@ -191,6 +188,7 @@ impl LipSync {
         res.volume = 0.0;
         res.distance = 0.0;
         self.phonemes.clear();
+        self.phonemes.resize(12 * self.profile.mfccs.len(), 0.0);
     }
 
     fn update_buffers(&mut self) {
@@ -203,8 +201,6 @@ impl LipSync {
     }
 
     fn update_result(&mut self) {
-        // TODO wait for thread to complete
-        // don't want to join thread because that will block
         // TODO don't unwrap, handle poisoning instead
         let job = self
             .job

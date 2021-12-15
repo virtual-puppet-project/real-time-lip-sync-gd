@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::algorithm::*;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct LipSyncJobResult {
     pub index: i64,
     pub volume: f64,
@@ -22,11 +22,15 @@ pub struct LipSyncJob {
     pub result: Arc<Mutex<LipSyncJobResult>>,
 
     pub is_complete: bool,
+    pub should_stop: bool,
 }
 
 impl LipSyncJob {
     pub fn new() -> Self {
-        LipSyncJob::default()
+        let mut lsj = LipSyncJob::default();
+        lsj.is_complete = true;
+
+        lsj
     }
 
     pub fn execute(&mut self) {
@@ -144,6 +148,7 @@ impl LipSyncJob {
         shared_res.index = res.index;
         shared_res.volume = res.volume;
         shared_res.distance = res.distance;
+        dbg!(shared_res);
     }
 
     fn get_vowel(&self, result: &mut LipSyncJobResult) {
@@ -162,9 +167,6 @@ impl LipSyncJob {
         let shared_mfcc = self.mfcc.lock().expect("Unable to lock mfcc");
         let mut distance: f64 = 0.0;
         let offset = index * 12;
-        // for i in 0..self.mfcc.len() {
-        //     distance += (self.mfcc[i] - self.phonemes[i + offset]).abs();
-        // }
         for i in 0..shared_mfcc.len() {
             distance += (shared_mfcc[i] - self.phonemes[i + offset]).abs();
         }

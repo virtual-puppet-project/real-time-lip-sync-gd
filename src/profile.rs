@@ -9,6 +9,14 @@ pub struct MfccData {
 }
 
 impl MfccData {
+    pub fn new(name: String) -> Self {
+        MfccData {
+            name: name,
+            mfcc_calibration_data_list: vec![],
+            mfcc_native_array: vec![],
+        }
+    }
+
     pub fn allocate(&self) {
         unimplemented!("Allocation happens when MfccData comes into scope")
     }
@@ -57,7 +65,6 @@ impl MfccData {
     }
 }
 
-#[derive(Default)]
 pub struct Profile {
     // The number of MFCC data to calculate the average MFCC values
     pub mfcc_data_count: i64, // defined as 1 - 256 in the Unity impl
@@ -67,10 +74,26 @@ pub struct Profile {
     pub target_sample_rate: i64, // defined as 1000 - 96000 in the Unity impl
     // Number of audio samples after downsampling is applied
     pub sample_count: i64,
-    pub min_volume: f64,
-    pub max_volume: f64,
+    // Configurable in increments of log10
+    pub min_volume: f64, // defined as -10 - 10 in the Unity impl
+    // Configurable in increments of log10
+    pub max_volume: f64, // defined as -10 - 10 in the Unity impl
 
     pub mfccs: Vec<MfccData>,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Profile {
+            mfcc_data_count: 32,
+            mel_filter_bank_channels: 24,
+            target_sample_rate: 16000,
+            sample_count: 512,
+            min_volume: -4.0,
+            max_volume: -2.0,
+            mfccs: vec![],
+        }
+    }
 }
 
 impl Profile {
@@ -87,15 +110,16 @@ impl Profile {
     }
 
     pub fn get_phoneme(&self, index: usize) -> String {
-        if index >= self.mfccs.len() {
-            "".to_string();
+        let mfccs_len = self.mfccs.len();
+        if mfccs_len == 0 || index >= mfccs_len {
+            return "".to_string();
         }
 
         self.mfccs[index].name.clone()
     }
 
     pub fn add_mfcc(&mut self, name: String) {
-        let mut data = MfccData::default();
+        let mut data = MfccData::new(name);
         for _ in 0..self.mfcc_data_count {
             data.mfcc_calibration_data_list
                 .push(MfccCalibrationData::default());
