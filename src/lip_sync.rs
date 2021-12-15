@@ -11,20 +11,12 @@ use crate::common::LipSyncInfo;
 use crate::lip_sync_job::*;
 use crate::profile::*;
 
-// struct JobHandle(mpsc::Receiver<LipSyncJobHandle>);
-
-// unsafe impl Sync for JobHandle {}
-// unsafe impl Send for JobHandle {}
-
-// struct JobTransmitter(mpsc::Sender<LipSyncJobHandle>);
-
-// unsafe impl Sync for JobTransmitter {}
-// unsafe impl Send for JobTransmitter {}
+const LIP_SYNC_UPDATED: &str = "lip_sync_updated";
+const LIP_SYNC_PANICKED: &str = "lip_sync_panicked";
 
 #[derive(NativeClass)]
 #[inherit(Reference)]
 #[user_data(user_data::RwLockData<LipSync>)]
-// #[user_data(user_data::ArcData<LipSync>)]
 #[register_with(Self::register_lip_sync)]
 pub struct LipSync {
     // Godot-specific stuff
@@ -56,20 +48,20 @@ impl LipSync {
         let thread_job = job.clone();
 
         let builder = thread::Builder::new();
-        // TODO handle thread spawn error
         let join_handle = match builder.spawn(move || loop {
-            // TODO don't unwrap, handle poisoning instead
-            let mut job = thread_job.lock().expect("Unable to lock job in thread");
-
-            if job.should_stop {
-                break;
+            match thread_job.lock() {
+                Ok(mut job) => {
+                    if job.should_stop {
+                        break;
+                    }
+                    if !job.is_complete {
+                        job.execute();
+                        job.is_complete = true;
+                    }
+                    drop(job);
+                }
+                Err(_) => {}
             }
-
-            if !job.is_complete {
-                job.execute();
-                job.is_complete = true;
-            }
-            drop(job);
         }) {
             Ok(v) => Some(v),
             Err(_) => None,
@@ -100,14 +92,24 @@ impl LipSync {
 
     fn register_lip_sync(builder: &ClassBuilder<Self>) {
         builder.add_signal(Signal {
-            name: "lip_sync_updated",
+            name: &LIP_SYNC_UPDATED,
             args: &[SignalArgument {
                 name: "result",
                 default: Variant::from_dictionary(&Dictionary::default()),
                 export_info: ExportInfo::new(VariantType::Dictionary),
                 usage: PropertyUsage::DEFAULT,
             }],
-        })
+        });
+
+        builder.add_signal(Signal {
+            name: &LIP_SYNC_PANICKED,
+            args: &[SignalArgument {
+                name: "message",
+                default: Variant::from_str("invalid error"),
+                export_info: ExportInfo::new(VariantType::GodotString),
+                usage: PropertyUsage::DEFAULT,
+            }],
+        });
     }
 
     // Maps to Awake() in the Unity impl
@@ -120,30 +122,37 @@ impl LipSync {
     #[export]
     pub fn update(&mut self, owner: &Reference) {
         {
-            // TODO don't unwrap, handle poisoning instead
-            let job = self
-                .job
-                .lock()
-                .expect("Unable to lock job in update_result");
-            if !job.is_complete {
-                return;
+            match self.job.lock() {
+                Ok(job) => {
+                    if !job.is_complete {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+                }
             }
         }
 
-        self.update_result();
+        self.update_result(owner);
         self.invoke_callback(owner);
         self.update_calibration();
         self.update_phonemes();
-        self.schedule_job();
+        self.schedule_job(owner);
 
         self.update_buffers();
         self.update_audio_source();
     }
 
     #[export]
-    pub fn stop_thread(&mut self, _owner: &Reference) {
-        let mut job = self.job.lock().expect("Unable to lock job in thread");
-        job.should_stop = true;
+    pub fn stop_thread(&mut self, owner: &Reference) {
+        match self.job.lock() {
+            Ok(mut job) => job.should_stop = true,
+            Err(e) => {
+                let _ =
+                    owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+            }
+        }
     }
 
     #[export]
@@ -153,18 +162,6 @@ impl LipSync {
             .expect("Unable to get join handle from option")
             .join()
             .expect("Unable to join thread");
-    }
-
-    fn awake() {
-        unimplemented!("Unity-specific")
-    }
-
-    fn on_enable() {
-        unimplemented!("Unity-specific")
-    }
-
-    fn on_disable() {
-        unimplemented!("Unity-specific")
     }
 
     fn allocate_buffers(&mut self) {}
@@ -200,17 +197,20 @@ impl LipSync {
         }
     }
 
-    fn update_result(&mut self) {
-        // TODO don't unwrap, handle poisoning instead
-        let job = self
-            .job
-            .lock()
-            .expect("Unable to lock job in update_result");
+    fn update_result(&mut self, owner: &Reference) {
+        let o_job = match self.job.lock() {
+            Ok(j) => Some(j),
+            Err(e) => {
+                owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+                return;
+            }
+        };
+
+        let job = o_job.unwrap();
 
         let mfcc = job.mfcc.lock().expect("Unable to lock mfcc on job");
         self.mfcc_for_other.copy_from_slice(&mfcc);
 
-        // TODO hopefully they're not just using lists as their main data structure
         let result = job.result.lock().expect("Unable to lock result on job");
         let index = result.index;
         let phoneme = self.profile.get_phoneme(index as usize);
@@ -244,7 +244,7 @@ impl LipSync {
         }
     }
 
-    fn schedule_job(&mut self) {
+    fn schedule_job(&mut self, owner: &Reference) {
         // The logic here doesn't make sense from the Unity impl
         // thus, it is commented out and we just use the struct value
         // let mut index: i64 = 0;
@@ -252,8 +252,16 @@ impl LipSync {
         self.input_data.clone_from(&self.raw_input_data);
         // index = self.index;
 
-        // TODO don't unwrap, handle poisoning instead
-        let mut job = self.job.lock().expect("Unable to lock job in schedule_job");
+        let o_job = match self.job.lock() {
+            Ok(j) => Some(j),
+            Err(e) => {
+                owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+                return;
+            }
+        };
+
+        let mut job = o_job.unwrap();
+
         // TODO cloning input for now, we might actually need a reference
         job.input = self.input_data.clone();
         job.start_index = self.index;
@@ -299,7 +307,13 @@ impl LipSync {
 
     // TODO connect to some audio thing
     // https://github.com/godot-rust/godot-rust/blob/0.9.3/examples/signals/src/lib.rs#L73
-    fn on_data_received(&mut self, _owner: &Reference, input: &mut TypedArray<f32>, channels: i64) {
+    // #[export]
+    pub fn on_data_received(
+        &mut self,
+        _owner: &Reference,
+        input: &mut TypedArray<f32>,
+        channels: i64,
+    ) {
         if self.raw_input_data.len() == 0 {
             return;
         }
