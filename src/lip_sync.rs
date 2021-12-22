@@ -1,5 +1,5 @@
 use gdnative::{
-    api::{AudioEffect, AudioServer},
+    api::{AudioEffectRecord, AudioServer, AudioStreamSample},
     prelude::*,
 };
 use std::{
@@ -11,6 +11,8 @@ use crate::common::LipSyncInfo;
 use crate::lip_sync_job::*;
 use crate::profile::*;
 
+const UPDATE_FRAME: i8 = 5;
+
 const LIP_SYNC_UPDATED: &str = "lip_sync_updated";
 const LIP_SYNC_PANICKED: &str = "lip_sync_panicked";
 
@@ -20,7 +22,7 @@ const LIP_SYNC_PANICKED: &str = "lip_sync_panicked";
 #[register_with(Self::register_lip_sync)]
 pub struct LipSync {
     // Godot-specific stuff
-    effect: Option<Ref<AudioEffect, Shared>>,
+    effect: Option<Ref<AudioEffectRecord, Shared>>,
 
     pub profile: Profile,
     pub output_sound_gain: f64,
@@ -45,27 +47,6 @@ pub struct LipSync {
 impl LipSync {
     fn new(_owner: &Reference) -> Self {
         let job = Arc::new(Mutex::new(LipSyncJob::new()));
-        let thread_job = job.clone();
-
-        let builder = thread::Builder::new();
-        let join_handle = match builder.spawn(move || loop {
-            match thread_job.lock() {
-                Ok(mut job) => {
-                    if job.should_stop {
-                        break;
-                    }
-                    if !job.is_complete {
-                        job.execute();
-                        job.is_complete = true;
-                    }
-                    drop(job);
-                }
-                Err(_) => {}
-            }
-        }) {
-            Ok(v) => Some(v),
-            Err(_) => None,
-        };
 
         LipSync {
             effect: None,
@@ -85,7 +66,7 @@ impl LipSync {
 
             result: LipSyncInfo::default(),
 
-            join_handle: join_handle,
+            join_handle: None,
             job: job,
         }
     }
@@ -114,7 +95,7 @@ impl LipSync {
 
     // Maps to Awake() in the Unity impl
     #[export]
-    fn _init(&mut self, _owner: &Reference) {
+    unsafe fn _init(&mut self, _owner: &Reference) {
         self.update_audio_source();
     }
 
@@ -141,7 +122,36 @@ impl LipSync {
         self.schedule_job(owner);
 
         self.update_buffers();
-        self.update_audio_source();
+        unsafe {
+            self.update_audio_source();
+        }
+    }
+
+    #[export]
+    pub fn start_thread(&mut self, _owner: &Reference) {
+        let job = self.job.clone();
+
+        let builder = thread::Builder::new();
+        let join_handle = match builder.spawn(move || loop {
+            match job.lock() {
+                Ok(mut job) => {
+                    if job.should_stop {
+                        break;
+                    }
+                    if !job.is_complete {
+                        job.execute();
+                        job.is_complete = true;
+                    }
+                    drop(job);
+                }
+                Err(_) => {}
+            }
+        }) {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        };
+
+        self.join_handle = join_handle;
     }
 
     #[export]
@@ -299,41 +309,52 @@ impl LipSync {
         self.requested_calibration_vowels.clear();
     }
 
-    fn update_audio_source(&mut self) {
+    unsafe fn update_audio_source(&mut self) {
         let audio_server = AudioServer::godot_singleton();
         let record_effect_index = audio_server.get_bus_index("Record");
-        self.effect = audio_server.get_bus_effect(record_effect_index, 0);
+        let bus_effect = audio_server
+            .get_bus_effect(record_effect_index, 0)
+            .unwrap()
+            .assume_unique();
+        self.effect = Some(
+            bus_effect
+                .cast::<AudioEffectRecord>()
+                .expect("Unable to cast into AudioEffectRecord")
+                .into_shared(),
+        );
     }
 
     // TODO connect to some audio thing
     // https://github.com/godot-rust/godot-rust/blob/0.9.3/examples/signals/src/lib.rs#L73
-    // #[export]
-    pub fn on_data_received(
-        &mut self,
-        _owner: &Reference,
-        input: &mut TypedArray<f32>,
-        channels: i64,
-    ) {
-        if self.raw_input_data.len() == 0 {
+    #[export]
+    pub fn input_data(&mut self, _owner: &Reference, input: TypedArray<u8>, channels: i64) {
+        if input.len() == 0 {
             return;
         }
 
-        let n = self.raw_input_data.len() as i64;
-        self.index = self.index % n;
-        let mut i = 0;
-        while i < input.len() {
-            self.index = (self.index + 1) % n;
-            self.raw_input_data[self.index as usize] = input.get(i as i32).into();
+        self.raw_input_data.clear();
 
-            i += channels as i32;
+        let converted_data = read_16_bit_samples(input);
+        for i in converted_data {
+            self.raw_input_data.push(i as f64);
         }
 
-        if (self.output_sound_gain - 1.0).abs() > f64::EPSILON {
-            let n = input.len() as i32;
-            for i in 0..n {
-                input.set(i, input.get(i) * self.output_sound_gain as f32);
-            }
-        }
+        // let n = self.raw_input_data.len() as i64;
+        // self.index = self.index % n;
+        // let mut i = 0;
+        // while i < input.len() {
+        //     self.index = (self.index + 1) % n;
+        //     self.raw_input_data[self.index as usize] = input.get(i as i32).into();
+
+        //     i += channels as i32;
+        // }
+
+        // if (self.output_sound_gain - 1.0).abs() > f64::EPSILON {
+        //     let n = input.len() as i32;
+        //     for i in 0..n {
+        //         input.set(i, input.get(i) * self.output_sound_gain as f32);
+        //     }
+        // }
     }
 
     fn on_audio_filter_read() {
@@ -366,4 +387,20 @@ impl LipSync {
             AudioServer::godot_singleton().get_mix_rate() / self.profile.target_sample_rate as f64;
         (self.profile.sample_count as f64 * r).ceil() as i64
     }
+}
+
+fn read_16_bit_samples(stream: TypedArray<u8>) -> Vec<i16> {
+    let mut res = vec![];
+
+    let mut i = 0;
+    while i < stream.len() {
+        let b0 = stream.get(i);
+        let b1 = stream.get(i + 1);
+
+        res.push(i16::from_ne_bytes([b0, b1]));
+
+        i += 2;
+    }
+
+    res
 }

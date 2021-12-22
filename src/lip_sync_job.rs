@@ -148,7 +148,6 @@ impl LipSyncJob {
         shared_res.index = res.index;
         shared_res.volume = res.volume;
         shared_res.distance = res.distance;
-        dbg!(shared_res);
     }
 
     fn get_vowel(&self, result: &mut LipSyncJobResult) {
