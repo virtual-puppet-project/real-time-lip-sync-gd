@@ -3,9 +3,7 @@ use gdnative::prelude::*;
 mod lip_sync;
 
 mod algorithm;
-mod common;
-mod lip_sync_job;
-mod profile;
+mod debug;
 
 fn init(handle: InitHandle) {
     handle.add_class::<lip_sync::LipSync>();

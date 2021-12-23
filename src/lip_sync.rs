@@ -2,72 +2,249 @@ use gdnative::{
     api::{AudioEffectRecord, AudioServer, AudioStreamSample},
     prelude::*,
 };
+use lazy_static::lazy_static;
+use rand::{rngs::ThreadRng, Rng};
 use std::{
+    collections::{HashMap, VecDeque},
+    ops::{Add, Div, Index, Mul, MulAssign},
     sync::{Arc, Mutex},
     thread,
 };
 
-use crate::common::LipSyncInfo;
-use crate::lip_sync_job::*;
-use crate::profile::*;
+use crate::algorithm::*;
 
-const UPDATE_FRAME: i8 = 5;
+const FFT_SAMPLES: usize = 1024;
+const UPDATE_FRAME: usize = 5;
+const DYNAMIC_RANGE: f32 = 100.0;
 
 const LIP_SYNC_UPDATED: &str = "lip_sync_updated";
 const LIP_SYNC_PANICKED: &str = "lip_sync_panicked";
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct DataPoint(pub f32, pub f32);
+
+impl DataPoint {
+    pub fn exp(self) -> DataPoint {
+        let e = self.0.exp();
+
+        DataPoint(e * self.1.cos(), e * self.1.sin())
+    }
+
+    pub fn zero() -> DataPoint {
+        DataPoint(0.0, 0.0)
+    }
+}
+
+impl Add for DataPoint {
+    type Output = DataPoint;
+    fn add(self, other: DataPoint) -> DataPoint {
+        DataPoint(self.0 + other.0, self.1 + other.1)
+    }
+}
+
+impl Mul<DataPoint> for DataPoint {
+    type Output = DataPoint;
+    fn mul(self, other: DataPoint) -> DataPoint {
+        let r = self.0 * other.0 - self.1 * other.1;
+        let i = self.0 * other.0 + self.1 * other.1;
+
+        DataPoint(r, i)
+    }
+}
+
+impl MulAssign<f32> for DataPoint {
+    fn mul_assign(&mut self, other: f32) {
+        self.0 *= other;
+        self.1 *= other;
+    }
+}
+
+impl Div for DataPoint {
+    type Output = DataPoint;
+    fn div(self, other: DataPoint) -> DataPoint {
+        let r = self.0 * other.0 + self.1 * other.1;
+        let i = self.1 * other.0 - self.1 * other.1;
+        let d = other.0 * other.0 + other.1 * other.1;
+
+        DataPoint(r / d, i / d)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct Phoneme(Vec<DataPoint>);
+
+impl Index<usize> for Phoneme {
+    type Output = DataPoint;
+    fn index(&self, idx: usize) -> &DataPoint {
+        &self.0[idx]
+    }
+}
+
+#[derive(Debug)]
+struct VowelEstimate {
+    estimate: i32,
+    vowel: i32,
+    amount: f32,
+}
+
+impl VowelEstimate {
+    fn new(estimate: i32, vowel: i32, amount: f32) -> Self {
+        VowelEstimate {
+            estimate: estimate,
+            vowel: vowel,
+            amount: amount,
+        }
+    }
+}
+
+impl From<VowelEstimate> for Dictionary {
+    fn from(ve: VowelEstimate) -> Self {
+        let dict = Dictionary::new();
+
+        dict.insert("estimate", ve.estimate);
+        dict.insert("vowel", ve.vowel);
+        dict.insert("amount", ve.amount);
+
+        dict.into_shared()
+    }
+}
+
+lazy_static! {
+    static ref DEFAULT_ESTIMATES: HashMap<String, HashMap<String, Phoneme>> = HashMap::from([
+        (
+            "peak3".to_owned(),
+            HashMap::from([
+                (
+                    "A".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(18.0, 1.0),
+                        DataPoint(41.0, 0.9),
+                        DataPoint(85.0, 0.75),
+                    ]),
+                ),
+                (
+                    "E".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(21.0, 1.0),
+                        DataPoint(60.0, 0.75),
+                        DataPoint(84.0, 0.65),
+                    ]),
+                ),
+                (
+                    "I".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(21.0, 1.0),
+                        DataPoint(42.0, 1.1),
+                        DataPoint(84.0, 1.0),
+                    ]),
+                ),
+                (
+                    "O".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(20.0, 1.0),
+                        DataPoint(63.0, 0.9),
+                        DataPoint(85.0, 0.8),
+                    ]),
+                ),
+                (
+                    "U".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(19.0, 1.0),
+                        DataPoint(47.0, 0.65),
+                        DataPoint(84.0, 0.7),
+                    ]),
+                ),
+            ]),
+        ),
+        (
+            "peak4".to_owned(),
+            HashMap::from([
+                (
+                    "A".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(18.0, 1.0),
+                        DataPoint(41.0, 0.9),
+                        DataPoint(68.0, 0.7),
+                        DataPoint(85.0, 0.55),
+                    ]),
+                ),
+                (
+                    "E".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(22.0, 1.0),
+                        DataPoint(43.0, 0.9),
+                        DataPoint(66.0, 0.7),
+                        DataPoint(84.0, 0.65)
+                    ])
+                ),
+                (
+                    "I".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(21.0, 1.0),
+                        DataPoint(42.0, 1.1),
+                        DataPoint(60.0, 1.0),
+                        DataPoint(84.0, 1.1)
+                    ])
+                ),
+                (
+                    "O".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(20.0, 1.0),
+                        DataPoint(39.0, 0.9),
+                        DataPoint(63.0, 0.75),
+                        DataPoint(85.0, 0.8)
+                    ])
+                ),
+                (
+                    "U".to_owned(),
+                    Phoneme(vec![
+                        DataPoint(20.0, 1.0),
+                        DataPoint(39.0, 0.7),
+                        DataPoint(65.0, 0.6),
+                        DataPoint(84.0, 0.75)
+                    ])
+                )
+            ]),
+        ),
+    ]);
+    pub static ref PI2: f32 = 2.0 * std::f32::consts::PI;
+    pub static ref INV_255: f32 = 1.0 / 255.0;
+    pub static ref INV_32767: f32 = 1.0 / 32767.0;
+    pub static ref INV_LOG10: f32 = 1.0 / (10.0 as f32).ln();
+    pub static ref INV_DYNAMIC_RANGE: f32 = 1.0 / DYNAMIC_RANGE;
+}
+
+const VOWELS: [&str; 5] = ["A", "E", "I", "O", "U"];
 
 #[derive(NativeClass)]
 #[inherit(Reference)]
 #[user_data(user_data::RwLockData<LipSync>)]
 #[register_with(Self::register_lip_sync)]
 pub struct LipSync {
-    // Godot-specific stuff
-    effect: Option<Ref<AudioEffectRecord, Shared>>,
-
-    pub profile: Profile,
-    pub output_sound_gain: f64,
-
-    index: i64,
-
-    raw_input_data: Vec<f64>,
-    input_data: Vec<f64>,
-    mfcc: Arc<Mutex<Vec<f64>>>,
-    mfcc_for_other: Vec<f64>,
-    phonemes: Vec<f64>,
-    job_result: Arc<Mutex<LipSyncJobResult>>,
-    requested_calibration_vowels: Vec<i64>,
-
-    result: LipSyncInfo,
-
     join_handle: Option<thread::JoinHandle<()>>,
-    job: Arc<Mutex<LipSyncJob>>,
+
+    before_sample_array: Vec<f32>,
+    peaks3_log: VecDeque<Vec<DataPoint>>, // TODO pretty sure these are just ring buffers
+    peaks4_log: VecDeque<Vec<DataPoint>>,
+    vowel_log: VecDeque<i32>,
+    estimate_log: VecDeque<i32>,
+
+    is_recording: bool,
 }
 
 #[methods]
 impl LipSync {
     fn new(_owner: &Reference) -> Self {
-        let job = Arc::new(Mutex::new(LipSyncJob::new()));
-
         LipSync {
-            effect: None,
-
-            profile: Profile::new(),
-            output_sound_gain: 1.0,
-
-            index: 0,
-
-            raw_input_data: vec![],
-            input_data: vec![],
-            mfcc: Arc::new(Mutex::new(vec![0.0; 12])),
-            mfcc_for_other: vec![],
-            phonemes: vec![],
-            job_result: Arc::new(Mutex::new(LipSyncJobResult::default())),
-            requested_calibration_vowels: vec![],
-
-            result: LipSyncInfo::default(),
-
             join_handle: None,
-            job: job,
+
+            before_sample_array: vec![],
+            peaks3_log: VecDeque::new(),
+            peaks4_log: VecDeque::new(),
+            vowel_log: VecDeque::from(vec![-1, -1, -1]),
+            estimate_log: VecDeque::from(vec![-1, -1, -1]),
+
+            is_recording: false,
         }
     }
 
@@ -93,303 +270,228 @@ impl LipSync {
         });
     }
 
-    // Maps to Awake() in the Unity impl
-    #[export]
-    unsafe fn _init(&mut self, _owner: &Reference) {
-        self.update_audio_source();
-    }
-
-    // Maps to Update() in the Unity impl
-    #[export]
-    pub fn update(&mut self, owner: &Reference) {
-        {
-            match self.job.lock() {
-                Ok(job) => {
-                    if !job.is_complete {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+    fn get_peaks(&self, data: &[f32], threshold: f32) -> Vec<DataPoint> {
+        let n = data.len() - 1;
+        let mut i = 1;
+        let mut out = vec![];
+        let mut div = 1.0;
+        while i < n {
+            if data[i] > threshold && data[i] > data[i - 1] && data[i] > data[i + 1] {
+                if out.len() > 0 {
+                    out.push(DataPoint(i as f32, data[i] * div));
+                } else {
+                    out.push(DataPoint(i as f32, 1.0));
+                    div = 1.0 / data[i];
                 }
             }
+            i += 1;
         }
-
-        self.update_result(owner);
-        self.invoke_callback(owner);
-        self.update_calibration();
-        self.update_phonemes();
-        self.schedule_job(owner);
-
-        self.update_buffers();
-        unsafe {
-            self.update_audio_source();
-        }
+        out
     }
-
-    #[export]
-    pub fn start_thread(&mut self, _owner: &Reference) {
-        let job = self.job.clone();
-
-        let builder = thread::Builder::new();
-        let join_handle = match builder.spawn(move || loop {
-            match job.lock() {
-                Ok(mut job) => {
-                    if job.should_stop {
-                        break;
+    fn get_peaks_average(&mut self, size: usize) -> Vec<DataPoint> {
+        let mut out = vec![];
+        let mut i = 1;
+        let mut j = 0;
+        let mut div = 1.0;
+        match size {
+            3 => {
+                out = self.peaks3_log[0].clone();
+                while i < self.peaks3_log.len() {
+                    j = 0;
+                    while j < out.len() {
+                        out[j].0 += self.peaks3_log[i][j].0;
+                        out[j].1 += self.peaks3_log[i][j].1;
+                        j += 1;
                     }
-                    if !job.is_complete {
-                        job.execute();
-                        job.is_complete = true;
-                    }
-                    drop(job);
+                    i += 1;
                 }
-                Err(_) => {}
+                div = 1.0 / self.peaks3_log.len() as f32;
             }
-        }) {
-            Ok(v) => Some(v),
-            Err(_) => None,
-        };
-
-        self.join_handle = join_handle;
-    }
-
-    #[export]
-    pub fn stop_thread(&mut self, owner: &Reference) {
-        match self.job.lock() {
-            Ok(mut job) => job.should_stop = true,
-            Err(e) => {
-                let _ =
-                    owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+            4 => {
+                out = self.peaks4_log[0].clone();
+                while i < self.peaks4_log.len() {
+                    j = 0;
+                    while j < out.len() {
+                        out[j].0 += self.peaks4_log[i][j].0;
+                        out[j].1 += self.peaks4_log[i][j].1;
+                        j += 1;
+                    }
+                    i += 1;
+                }
+                div = 1.0 / self.peaks4_log.len() as f32;
             }
+            _ => {}
         }
-    }
 
-    #[export]
-    pub fn shutdown(&mut self, _owner: &Reference) {
-        self.join_handle
-            .take()
-            .expect("Unable to get join handle from option")
-            .join()
-            .expect("Unable to join thread");
-    }
-
-    fn allocate_buffers(&mut self) {}
-
-    fn dispose_buffers(&mut self) {
-        self.raw_input_data.clear();
-        self.input_data.clear();
-        let mut mfcc = self
-            .mfcc
-            .lock()
-            .expect("Unable to lock mfcc when disposing of the buffer");
-        mfcc.clear();
-        mfcc.resize(12, 0.0);
-        self.mfcc_for_other.clear();
-        self.mfcc_for_other.resize(12, 0.0);
-        let mut res = self
-            .job_result
-            .lock()
-            .expect("Unable to lock job_result when disposing of the buffer");
-        res.index = 0;
-        res.volume = 0.0;
-        res.distance = 0.0;
-        self.phonemes.clear();
-        self.phonemes.resize(12 * self.profile.mfccs.len(), 0.0);
-    }
-
-    fn update_buffers(&mut self) {
-        if self.input_sample_count() != self.raw_input_data.len() as i64
-            || self.profile.mfccs.len() * 12 != self.phonemes.len()
-        {
-            self.dispose_buffers();
-            self.allocate_buffers();
+        for k in out.iter_mut() {
+            *k *= div;
         }
+
+        out
     }
 
-    fn update_result(&mut self, owner: &Reference) {
-        let o_job = match self.job.lock() {
-            Ok(j) => Some(j),
-            Err(e) => {
-                owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
-                return;
+    fn get_distance_from_db(&self, data: &[DataPoint]) -> Vec<f32> {
+        let mut out = vec![];
+
+        let mut dist = 0.0;
+
+        let mut peak_est: &HashMap<String, Phoneme> = match data.len() {
+            3 => &DEFAULT_ESTIMATES["peak3"],
+            4 => &DEFAULT_ESTIMATES["peak4"],
+            _ => {
+                return out;
             }
         };
 
-        let job = o_job.unwrap();
+        for i in VOWELS {
+            dist = 0.0;
+            for j in 0..data.len() {
+                let est = &peak_est[i][j];
+                dist += (est.0 - data[j].0).abs() * *INV_255 + (est.1 - data[j].1);
+            }
+            out.push(dist);
+        }
 
-        let mfcc = job.mfcc.lock().expect("Unable to lock mfcc on job");
-        self.mfcc_for_other.copy_from_slice(&mfcc);
-
-        let result = job.result.lock().expect("Unable to lock result on job");
-        let index = result.index;
-        let phoneme = self.profile.get_phoneme(index as usize);
-        let distance = result.distance;
-        let mut vol = result.volume.log10();
-        let min_vol = self.profile.min_volume;
-        let max_vol = self.profile.max_volume.max(min_vol + 1e-4_f64);
-        vol = (vol - min_vol) / (max_vol - min_vol);
-        vol = f64::clamp(vol, 0.0, 1.0);
-
-        self.result = LipSyncInfo::new(index, phoneme, vol, result.volume, distance);
+        out
     }
 
-    fn invoke_callback(&mut self, owner: &Reference) {
-        owner.emit_signal(
-            "lip_sync_updated",
-            &[Variant::from_dictionary(&self.result(owner))],
-        );
-    }
-
-    fn update_phonemes(&mut self) {
-        let mut index: usize = 0;
-        for data in self.profile.mfccs.iter() {
-            for value in data.mfcc_native_array.iter() {
-                if index >= self.phonemes.len() {
-                    break;
+    fn push_peaks(&mut self, data: &[DataPoint]) {
+        match data.len() {
+            3 => {
+                if self.peaks3_log.len() < 3 {
+                    self.peaks3_log.push_back(data.to_owned());
+                } else {
+                    self.peaks3_log.push_front(data.to_owned());
+                    self.peaks3_log.pop_back();
                 }
-                index += 1;
-                self.phonemes[index] = *value;
+            }
+            4 => {
+                if self.peaks4_log.len() < 3 {
+                    self.peaks4_log.push_back(data.to_owned());
+                } else {
+                    self.peaks4_log.push_front(data.to_owned());
+                    self.peaks4_log.pop_back();
+                }
+            }
+            _ => godot_print!("push_peaks encountered invalid data"),
+        }
+    }
+
+    fn estimate_vowel(&mut self, data: &[f32]) -> i32 {
+        let peaks = self.get_peaks(data, 0.1);
+        if peaks.len() != 3 && peaks.len() != 4 {
+            return -1;
+        }
+
+        self.push_peaks(peaks.as_slice());
+
+        let peaks_ave = self.get_peaks_average(peaks.len());
+        let distance_vowel = self.get_distance_from_db(peaks_ave.as_slice());
+
+        let mut i = 1;
+        let mut min_distance = distance_vowel[0];
+        let mut min_idx = 0;
+        while i < UPDATE_FRAME as usize {
+            let dist = distance_vowel[i];
+            if dist < min_distance {
+                min_distance = dist;
+                min_idx = i as i32;
+            }
+            i += 1;
+        }
+
+        min_idx
+    }
+
+    fn get_vowel(&mut self, data: &[f32], amount: f32) -> VowelEstimate {
+        let current = self.estimate_vowel(data);
+
+        let f_vowel = self.vowel_log[0];
+
+        if self.vowel_log[0] != -1 {
+            if amount < 0.5 {
+                return VowelEstimate::new(current, f_vowel, amount);
             }
         }
-    }
 
-    fn schedule_job(&mut self, owner: &Reference) {
-        // The logic here doesn't make sense from the Unity impl
-        // thus, it is commented out and we just use the struct value
-        // let mut index: i64 = 0;
-
-        self.input_data.clone_from(&self.raw_input_data);
-        // index = self.index;
-
-        let o_job = match self.job.lock() {
-            Ok(j) => Some(j),
-            Err(e) => {
-                owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
-                return;
+        if self.vowel_log.len() > 2 {
+            if current == self.estimate_log[0] {
+                if current != -1 {
+                    return VowelEstimate::new(current, current, amount);
+                }
+            } else {
+                if f_vowel != -1 {
+                    return VowelEstimate::new(current, f_vowel, amount);
+                }
             }
-        };
+        }
 
-        let mut job = o_job.unwrap();
+        return VowelEstimate::new(current, rand::thread_rng().gen_range(0..5), amount);
+    }
 
-        // TODO cloning input for now, we might actually need a reference
-        job.input = self.input_data.clone();
-        job.start_index = self.index;
-        job.output_sample_rate = AudioServer::godot_singleton().get_mix_rate() as i64;
-        job.target_sample_rate = self.profile.target_sample_rate;
-        job.volume_thresh = (10.0 as f64).powf(self.profile.min_volume);
-        job.mel_filter_bank_channels = self.profile.mel_filter_bank_channels;
-        job.mfcc = self.mfcc.clone();
-        job.phonemes = self.phonemes.clone();
-        job.result = self.job_result.clone();
+    fn push_vowel(&mut self, vowel: i32) {
+        if self.vowel_log.len() < 3 {
+            self.vowel_log.push_back(vowel);
+        } else {
+            self.vowel_log.push_front(vowel);
+            self.vowel_log.pop_back();
+        }
+    }
 
-        job.is_complete = false;
+    fn push_estimate(&mut self, vowel: i32) {
+        if self.estimate_log.len() < 3 {
+            self.estimate_log.push_back(vowel);
+        } else {
+            self.estimate_log.push_front(vowel);
+            self.estimate_log.pop_back();
+        }
     }
 
     #[export]
-    pub fn request_calibration(&mut self, _owner: &Reference, index: i64) {
-        if index < 0 {
-            return;
+    pub fn update(&mut self, owner: &Reference, stream: TypedArray<u8>) {
+        let samples = read_16_bit_samples(stream);
+        let rms = rms(samples.as_slice());
+        if samples.len() >= FFT_SAMPLES {
+            let mut data = samples[..FFT_SAMPLES].to_vec();
+            hamming(data.as_mut_slice());
+            rfft(data.as_mut_slice(), false, true);
+            data = data[..(FFT_SAMPLES as f32 * 0.5) as usize].to_vec();
+            if self.before_sample_array.len() > 0 {
+                smoothing(data.as_mut_slice(), self.before_sample_array.as_slice());
+            }
+            self.before_sample_array = data.clone();
+            filter(data.as_mut_slice(), 10, 95);
+            for i in data.iter_mut() {
+                *i = i.powi(2).ln() * *INV_LOG10;
+            }
+            normalize(data.as_mut_slice());
+            rfft(data.as_mut_slice(), true, false);
+            lifter(data.as_mut_slice(), 26);
+            rfft(data.as_mut_slice(), false, false);
+            data = data[..(FFT_SAMPLES as f32 * 0.25) as usize].to_vec();
+            normalize(data.as_mut_slice());
+            for i in data.iter_mut() {
+                *i = i.powi(2);
+            }
+            normalize(data.as_mut_slice());
+            let nrm_rms = DYNAMIC_RANGE.min((rms + DYNAMIC_RANGE).max(0.0));
+            for i in data.iter_mut() {
+                *i = *i * nrm_rms * *INV_DYNAMIC_RANGE;
+            }
+            let amount = inverse_lerp(-DYNAMIC_RANGE, 0.0, rms).clamp(0.0, 1.0);
+            let current_vowel = self.get_vowel(data.as_slice(), amount);
+            self.push_estimate(current_vowel.estimate);
+            self.push_vowel(current_vowel.vowel);
+
+            owner.emit_signal(
+                "lip_sync_updated",
+                &[Variant::from_dictionary(&Dictionary::from(current_vowel))],
+            );
         }
-        self.requested_calibration_vowels.push(index);
-    }
-
-    fn update_calibration(&mut self) {
-        let shared_mfcc = self
-            .mfcc
-            .lock()
-            .expect("Unable to lock mfcc in update_calibration");
-        for index in self.requested_calibration_vowels.iter() {
-            // We can assume index is greater than 0 because we check
-            // for this in request_calibration
-            self.profile
-                .update_mfcc(*index as usize, shared_mfcc.clone(), true);
-        }
-
-        self.requested_calibration_vowels.clear();
-    }
-
-    unsafe fn update_audio_source(&mut self) {
-        let audio_server = AudioServer::godot_singleton();
-        let record_effect_index = audio_server.get_bus_index("Record");
-        let bus_effect = audio_server
-            .get_bus_effect(record_effect_index, 0)
-            .unwrap()
-            .assume_unique();
-        self.effect = Some(
-            bus_effect
-                .cast::<AudioEffectRecord>()
-                .expect("Unable to cast into AudioEffectRecord")
-                .into_shared(),
-        );
-    }
-
-    // TODO connect to some audio thing
-    // https://github.com/godot-rust/godot-rust/blob/0.9.3/examples/signals/src/lib.rs#L73
-    #[export]
-    pub fn input_data(&mut self, _owner: &Reference, input: TypedArray<u8>, channels: i64) {
-        if input.len() == 0 {
-            return;
-        }
-
-        self.raw_input_data.clear();
-
-        let converted_data = read_16_bit_samples(input);
-        for i in converted_data {
-            self.raw_input_data.push(i as f64);
-        }
-
-        // let n = self.raw_input_data.len() as i64;
-        // self.index = self.index % n;
-        // let mut i = 0;
-        // while i < input.len() {
-        //     self.index = (self.index + 1) % n;
-        //     self.raw_input_data[self.index as usize] = input.get(i as i32).into();
-
-        //     i += channels as i32;
-        // }
-
-        // if (self.output_sound_gain - 1.0).abs() > f64::EPSILON {
-        //     let n = input.len() as i32;
-        //     for i in 0..n {
-        //         input.set(i, input.get(i) * self.output_sound_gain as f32);
-        //     }
-        // }
-    }
-
-    fn on_audio_filter_read() {
-        // TODO this might not be true
-        unimplemented!("Unity-specific")
-    }
-
-    // Changed from property in the Unity impl to function
-    // TODO might need to convert to Godot Array
-    pub fn mfcc(&self) -> &Vec<f64> {
-        &self.mfcc_for_other
-    }
-
-    // Changed from property in the Unity impl to function
-    #[export]
-    pub fn result(&self, _owner: &Reference) -> Dictionary {
-        let dict = Dictionary::new();
-        dict.insert("index", self.result.index);
-        dict.insert("phoneme", self.result.phoneme.clone());
-        dict.insert("volume", self.result.volume);
-        dict.insert("raw_volume", self.result.raw_volume);
-        dict.insert("distance", self.result.distance);
-
-        dict.into_shared()
-    }
-
-    // Changed from property in the Unity impl to function
-    fn input_sample_count(&self) -> i64 {
-        let r =
-            AudioServer::godot_singleton().get_mix_rate() / self.profile.target_sample_rate as f64;
-        (self.profile.sample_count as f64 * r).ceil() as i64
     }
 }
 
-fn read_16_bit_samples(stream: TypedArray<u8>) -> Vec<i16> {
+fn read_16_bit_samples(stream: TypedArray<u8>) -> Vec<f32> {
     let mut res = vec![];
 
     let mut i = 0;
@@ -397,7 +499,13 @@ fn read_16_bit_samples(stream: TypedArray<u8>) -> Vec<i16> {
         let b0 = stream.get(i);
         let b1 = stream.get(i + 1);
 
-        res.push(i16::from_ne_bytes([b0, b1]));
+        let mut u = ((b0 as u16) << 8) | b1 as u16;
+
+        u = (u + 32768) & 0xffff;
+
+        let s = (u - 32768) as f32 / 32768.0;
+
+        res.push(s);
 
         i += 2;
     }
