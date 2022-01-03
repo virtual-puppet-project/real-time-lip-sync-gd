@@ -1,7 +1,7 @@
-use lazy_static::lazy_static;
+use gdnative::prelude::*;
 use std::boxed::Box;
 
-use crate::lip_sync::{DataPoint, INV_LOG10, PI2};
+use crate::model::{DataPoint, INV_LOG10, PI2};
 
 pub fn rms(data: &[f32]) -> f32 {
     let mut rms: f32 = 0.0;
@@ -12,6 +12,8 @@ pub fn rms(data: &[f32]) -> f32 {
 
     rms = (rms / data.len() as f32).sqrt();
     rms = 20.0 * (rms.ln() * *INV_LOG10);
+
+    // godot_print!("{}", data[0]);
 
     rms
 }
@@ -127,9 +129,13 @@ pub fn filter(data: &mut [f32], lowcut: i32, highcut: i32) {
 }
 
 pub fn lerp(a: f32, b: f32, f: f32) -> f32 {
+    // l = a + f * (b - a)
     a + f * (b - a)
 }
 
-pub fn inverse_lerp(a: f32, b: f32, f: f32) -> f32 {
-    (f - a) / (b - a)
+pub fn inverse_lerp(a: f32, b: f32, l: f32) -> f32 {
+    // l = a + f * (b - a)
+    // l - a = f * (b - a)
+    // (l - a)/(b - a) = f
+    (l - a) / (b - a)
 }
