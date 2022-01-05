@@ -6,7 +6,7 @@ use std::{
 };
 
 pub const FFT_SAMPLES: usize = 1024;
-pub const UPDATE_FRAME: usize = 5;
+// pub const UPDATE_FRAME: usize = 5;
 pub const DYNAMIC_RANGE: f32 = 100.0;
 
 pub const VOWELS: [&str; 5] = ["A", "E", "I", "O", "U"];
