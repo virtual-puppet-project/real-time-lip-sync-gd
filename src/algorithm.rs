@@ -1,4 +1,3 @@
-use gdnative::prelude::*;
 use std::boxed::Box;
 
 use crate::model::{DataPoint, INV_LOG10, PI2};
@@ -12,8 +11,6 @@ pub fn rms(data: &[f32]) -> f32 {
 
     rms = (rms / data.len() as f32).sqrt();
     rms = 20.0 * (rms.ln() * *INV_LOG10);
-
-    // godot_print!("{}", data[0]);
 
     rms
 }

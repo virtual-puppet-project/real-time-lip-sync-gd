@@ -9,6 +9,6 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-gdnative = "0.9.3"
+godot = { git = "https://github.com/godot-rust/gdext.git" }
 lazy_static = "1.4.0"
 rand = "0.8.4"
