@@ -212,7 +212,7 @@ impl Job {
         let mut i = 1;
         let mut min_distance = distance_vowel[0];
         let mut min_idx = 0;
-        while i < FFT_SAMPLES as usize {
+        while i < VOWELS.len() {
             let dist = distance_vowel[i];
             if dist < min_distance {
                 min_distance = dist;
