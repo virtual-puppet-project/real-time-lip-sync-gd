@@ -16,7 +16,7 @@ const LIP_SYNC_PANICKED: &str = "panicked";
 
 #[derive(GodotClass)]
 #[class(base = Node)]
-pub struct LipSync {
+pub struct LipSyncRs {
     join_handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<job::JobMessage>,
     receiver: mpsc::Receiver<job::JobMessage>,
@@ -24,12 +24,12 @@ pub struct LipSync {
     base: Base<Node>,
 }
 
-unsafe impl Sync for LipSync {}
+unsafe impl Sync for LipSyncRs {}
 
-unsafe impl Send for LipSync {}
+unsafe impl Send for LipSyncRs {}
 
 #[godot_api]
-impl LipSync {
+impl LipSyncRs {
     #[signal]
     fn updated();
 
@@ -83,11 +83,11 @@ impl LipSync {
 }
 
 #[godot_api]
-impl INode for LipSync {
+impl INode for LipSyncRs {
     fn init(base: Base<Self::Base>) -> Self {
         let (jh, s, r) = job::create_job().expect("Unable to create job thread");
 
-        LipSync {
+        LipSyncRs {
             join_handle: Some(jh),
             sender: s,
             receiver: r,
