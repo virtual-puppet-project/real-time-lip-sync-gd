@@ -1,4 +1,4 @@
-use gdnative::prelude::*;
+use godot::prelude::*;
 
 pub fn print_max(sample_vec: Vec<f32>) {
     let mut max: f32 = 0.0;

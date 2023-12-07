@@ -1,4 +1,4 @@
-use gdnative::prelude::*;
+use godot::prelude::*;
 
 mod lip_sync;
 
@@ -7,8 +7,7 @@ mod debug;
 mod job;
 mod model;
 
-fn init(handle: InitHandle) {
-    handle.add_class::<lip_sync::LipSync>();
-}
+struct LipSyncLib;
 
-godot_init!(init);
+#[gdextension]
+unsafe impl ExtensionLibrary for LipSyncLib {}

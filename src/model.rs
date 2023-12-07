@@ -1,4 +1,4 @@
-use gdnative::prelude::*;
+use godot::prelude::*;
 use lazy_static::lazy_static;
 use std::{
     collections::{HashMap, VecDeque},
@@ -186,21 +186,21 @@ pub struct VowelEstimate {
 impl VowelEstimate {
     pub fn new(estimate: i32, vowel: i32, amount: f32) -> Self {
         VowelEstimate {
-            estimate: estimate,
-            vowel: vowel,
-            amount: amount,
+            estimate,
+            vowel,
+            amount,
         }
     }
 }
 
 impl From<VowelEstimate> for Dictionary {
     fn from(ve: VowelEstimate) -> Self {
-        let dict = Dictionary::new();
+        let mut dict = Dictionary::new();
 
         dict.insert("estimate", ve.estimate);
         dict.insert("vowel", ve.vowel);
         dict.insert("amount", ve.amount);
 
-        dict.into_shared()
+        dict
     }
 }

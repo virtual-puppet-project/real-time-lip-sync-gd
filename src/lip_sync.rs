@@ -1,7 +1,4 @@
-use gdnative::{
-    api::{AudioEffectRecord, AudioServer, AudioStreamSample},
-    prelude::*,
-};
+use godot::prelude::*;
 use lazy_static::lazy_static;
 use rand::{rngs::ThreadRng, Rng};
 use std::{
@@ -14,71 +11,48 @@ use std::{
 
 use crate::{job, job::JobMessage};
 
-const LIP_SYNC_UPDATED: &str = "lip_sync_updated";
-const LIP_SYNC_PANICKED: &str = "lip_sync_panicked";
+const LIP_SYNC_UPDATED: &str = "updated";
+const LIP_SYNC_PANICKED: &str = "panicked";
 
-#[derive(NativeClass)]
-#[inherit(Reference)]
-#[user_data(user_data::RwLockData<LipSync>)]
-#[register_with(Self::register_lip_sync)]
-pub struct LipSync {
+#[derive(GodotClass)]
+#[class(base = Node)]
+pub struct LipSyncRs {
     join_handle: Option<thread::JoinHandle<()>>,
     sender: mpsc::Sender<job::JobMessage>,
     receiver: mpsc::Receiver<job::JobMessage>,
+    #[base]
+    base: Base<Node>,
 }
 
-unsafe impl Sync for LipSync {}
-unsafe impl Send for LipSync {}
+unsafe impl Sync for LipSyncRs {}
 
-#[methods]
-impl LipSync {
-    fn new(_owner: &Reference) -> Self {
-        let (jh, s, r) = job::create_job().expect("Unable to create job thread");
+unsafe impl Send for LipSyncRs {}
 
-        LipSync {
-            join_handle: Some(jh),
-            sender: s,
-            receiver: r,
-        }
-    }
+#[godot_api]
+impl LipSyncRs {
+    #[signal]
+    fn updated();
 
-    fn register_lip_sync(builder: &ClassBuilder<Self>) {
-        builder.add_signal(Signal {
-            name: &LIP_SYNC_UPDATED,
-            args: &[SignalArgument {
-                name: "result",
-                default: Variant::from_dictionary(&Dictionary::default()),
-                export_info: ExportInfo::new(VariantType::Dictionary),
-                usage: PropertyUsage::DEFAULT,
-            }],
-        });
+    #[signal]
+    fn panicked();
 
-        builder.add_signal(Signal {
-            name: &LIP_SYNC_PANICKED,
-            args: &[SignalArgument {
-                name: "message",
-                default: Variant::from_str("invalid error"),
-                export_info: ExportInfo::new(VariantType::GodotString),
-                usage: PropertyUsage::DEFAULT,
-            }],
-        });
-    }
-
-    #[export]
-    pub fn update(&mut self, _owner: &Reference, stream: TypedArray<f32>) {
+    #[func]
+    pub fn update(&mut self, stream: Array<f32>) {
         self.sender
             .send(JobMessage::InputData(stream))
             .expect("Unable to send stream to thread");
     }
 
-    #[export]
-    pub fn poll(&self, owner: &Reference) {
+    #[func]
+    pub fn poll(&mut self) {
         match self.receiver.try_recv() {
             Ok(v) => match v {
                 JobMessage::OutputData(od) => {
-                    owner.emit_signal(
-                        LIP_SYNC_UPDATED,
-                        &[Variant::from_dictionary(&Dictionary::from(od))],
+                    // godot_print!("Emitted signal: {:?}", LIP_SYNC_UPDATED);
+
+                    self.base.emit_signal(
+                        LIP_SYNC_UPDATED.into(),
+                        &[Variant::from(Dictionary::from(od))],
                     );
                 }
                 _ => {
@@ -88,19 +62,36 @@ impl LipSync {
             },
             Err(e) => {
                 if e == mpsc::TryRecvError::Disconnected {
-                    owner.emit_signal(LIP_SYNC_PANICKED, &[Variant::from_str(format!("{}", e))]);
+                    // godot_print!("Emitted signal: {:?}", LIP_SYNC_PANICKED);
+
+                    self.base
+                        .emit_signal(LIP_SYNC_PANICKED.into(), &[Variant::from(format!("{}", e))]);
                 }
             }
         }
     }
 
-    #[export]
-    pub fn shutdown(&mut self, _owner: &Reference) {
-        self.sender.send(JobMessage::Shutdown).expect("When shutting down thread because of invalid message, encoutered error. Shutting down anyways.");
+    #[func]
+    pub fn shutdown(&mut self) {
+        self.sender.send(JobMessage::Shutdown).expect("When shutting down thread because of invalid message, encountered error. Shutting down anyways.");
         self.join_handle
             .take()
             .expect("Unable to take join_handle")
             .join()
             .expect("Unable to join thread");
+    }
+}
+
+#[godot_api]
+impl INode for LipSyncRs {
+    fn init(base: Base<Self::Base>) -> Self {
+        let (jh, s, r) = job::create_job().expect("Unable to create job thread");
+
+        LipSyncRs {
+            join_handle: Some(jh),
+            sender: s,
+            receiver: r,
+            base,
+        }
     }
 }

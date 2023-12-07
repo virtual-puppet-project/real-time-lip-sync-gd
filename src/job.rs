@@ -1,5 +1,5 @@
 use crate::{algorithm::*, model::*};
-use gdnative::prelude::*;
+use godot::prelude::*;
 use rand::Rng;
 use std::{
     collections::{HashMap, VecDeque},
@@ -9,7 +9,8 @@ use std::{
 
 struct Job {
     before_sample_array: Vec<f32>,
-    peaks3_log: VecDeque<Vec<DataPoint>>, // TODO pretty sure these are just ring buffers
+    // TODO pretty sure these are just ring buffers
+    peaks3_log: VecDeque<Vec<DataPoint>>,
     peaks4_log: VecDeque<Vec<DataPoint>>,
     vowel_log: VecDeque<i32>,
     estimate_log: VecDeque<i32>,
@@ -26,14 +27,15 @@ impl Job {
         }
     }
 
-    pub fn execute(&mut self, stream: &TypedArray<f32>) -> Option<VowelEstimate> {
+    pub fn execute(&mut self, stream: &Array<f32>) -> Option<VowelEstimate> {
         // let mut data = Job::read_16_bit_samples(stream);
         let mut data = vec![];
-        for i in stream.read().iter() {
-            data.push(*i);
+        for i in stream.iter_shared() {
+            data.push(i);
         }
 
         if data.len() < FFT_SAMPLES {
+            godot_print!("Audio data size is too small, skipped!");
             return None;
         }
 
@@ -74,7 +76,7 @@ impl Job {
     }
 
     // TODO this is returning values that are not in range -1..1
-    fn read_16_bit_samples(stream: &TypedArray<u8>) -> Vec<f32> {
+    fn read_16_bit_samples(stream: &Array<u8>) -> Vec<f32> {
         let mut res = vec![];
         let mut i = 0;
         while i < stream.len() {
@@ -210,7 +212,7 @@ impl Job {
         let mut i = 1;
         let mut min_distance = distance_vowel[0];
         let mut min_idx = 0;
-        while i < FFT_SAMPLES as usize {
+        while i < VOWELS.len() {
             let dist = distance_vowel[i];
             if dist < min_distance {
                 min_distance = dist;
@@ -268,10 +270,12 @@ impl Job {
 }
 
 pub enum JobMessage {
-    InputData(TypedArray<f32>),
+    InputData(Array<f32>),
     OutputData(VowelEstimate),
     Shutdown,
 }
+
+unsafe impl Send for JobMessage {}
 
 pub fn create_job() -> Option<(
     thread::JoinHandle<()>,
@@ -285,7 +289,7 @@ pub fn create_job() -> Option<(
 
     let builder = thread::Builder::new();
     match builder.spawn(move || loop {
-        let new_data: TypedArray<f32>;
+        let new_data: Array<f32>;
         if let Ok(msg) = r1.recv() {
             match msg {
                 JobMessage::InputData(d) => new_data = d,
